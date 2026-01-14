@@ -209,3 +209,30 @@ Dataset/
 expd/
 data/
 __pycache__/
+
+# 忽略所有模型权重文件 (非常重要！否则 push 会失败)
+*.pth
+*.tar
+*.onnx
+
+# 忽略训练生成的权重文件夹
+weights/
+checkpoints/
+
+# 忽略可视化结果和测试输出
+vis_results/
+outputs/
+results/
+
+# 忽略 Tensorboard 日志 (如果有用到)
+runs/
+tensorboard/
+
+# 忽略 Mac 系统生成的垃圾文件 (如果你或你的队友用 Mac)
+.DS_Store
+
+# 忽略 IDE 配置文件夹 (推荐)
+.idea/
+.vscode/
+
+Miniconda3-latest-Linux-x86_64.sh
