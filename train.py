@@ -6,7 +6,7 @@ from dataset import CrowdDataset, collate_fn
 from p2pnet import P2PNet, P2PNetLoss, HungarianMatcher
 
 # --- Config ---
-DATA_ROOT = "/run/media/Shutong/Data/Study/deep learning/project/expd"
+DATA_ROOT = "Dataset/ShanghaiTech"
 EPOCHS = 200
 BATCH_SIZE = 4  # 如果显存不够(报错OOM)，把这里改成 2 或 1
 LR = 1e-4
@@ -71,7 +71,12 @@ def main():
         
         # 保存权重
         if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), os.path.join(WEIGHT_DIR, f"epoch_{epoch+1}.pth"))
+            ckpt_path = os.path.join(WEIGHT_DIR, f"epoch_{epoch+1}.pth")
+            torch.save({'model': model.state_dict()}, ckpt_path)
+
+        if (epoch + 1) == EPOCHS:
+            latest_path = os.path.join(WEIGHT_DIR, "latest.pth")
+            torch.save({'model': model.state_dict()}, latest_path)
 
 if __name__ == "__main__":
     main()

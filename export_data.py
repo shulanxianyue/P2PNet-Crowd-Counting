@@ -12,8 +12,8 @@ except ImportError:
     tqdm = lambda x: x
 
 # Paths
-INPUT_ROOT = "/run/media/Shutong/Data/Study/deep learning/project/Dataset/part_A_final/train_data"
-OUTPUT_ROOT = "/run/media/Shutong/Data/Study/deep learning/project/expd/part_A_final/train_data"
+INPUT_ROOT = "Dataset/ShanghaiTech/part_A_final/train_data"
+OUTPUT_ROOT = "expd/part_A_final/train_data"
 TARGET_SIZE = 224
 
 def preprocess_dataset():

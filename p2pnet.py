@@ -132,7 +132,8 @@ class HungarianMatcher(nn.Module):
             tgt_bbox = targets[i]['point'].to(p_bbox.device)
             
             if len(tgt_bbox) == 0:
-                indices.append((torch.as_tensor([]), torch.as_tensor([])))
+                empty = torch.as_tensor([], dtype=torch.int64)
+                indices.append((empty, empty))
                 continue
 
             # Compute Cost Matrix
@@ -161,6 +162,11 @@ class P2PNetLoss(nn.Module):
         super().__init__()
         self.matcher = matcher
         self.lambda_neg = lambda_neg # 教程中的 lambda_neg
+        # These weights mirror DETR-style balancing between classification and point losses
+        self.weight_dict = {
+            'loss_ce': 1.0,
+            'loss_point': 1.0,
+        }
 
     def forward(self, outputs, targets):
         indices = self.matcher(outputs, targets)
@@ -169,8 +175,12 @@ class P2PNetLoss(nn.Module):
         idx = self._get_src_permutation_idx(indices)
         src_logits = outputs['pred_logits']
         src_points = outputs['pred_points']
-        
-        target_points = torch.cat([t['point'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+
+        matched_points = [t['point'][i] for t, (_, i) in zip(targets, indices) if i.numel() > 0]
+        if matched_points:
+            target_points = torch.cat(matched_points, dim=0)
+        else:
+            target_points = torch.zeros((0, 2), device=src_points.device, dtype=src_points.dtype)
 
         # --- 1. Classification Loss (BCE with Weight) ---
         target_classes = torch.zeros_like(src_logits.squeeze(-1))
@@ -195,6 +205,18 @@ class P2PNetLoss(nn.Module):
         return {'loss_ce': loss_ce, 'loss_point': loss_point}
 
     def _get_src_permutation_idx(self, indices):
-        batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
-        src_idx = torch.cat([src for (src, _) in indices])
+        batch_entries = []
+        src_entries = []
+        for i, (src, _) in enumerate(indices):
+            if src.numel() == 0:
+                continue
+            batch_entries.append(torch.full_like(src, i, dtype=torch.int64))
+            src_entries.append(src.to(torch.int64))
+
+        if not batch_entries:
+            empty = torch.as_tensor([], dtype=torch.int64)
+            return empty, empty
+
+        batch_idx = torch.cat(batch_entries)
+        src_idx = torch.cat(src_entries)
         return batch_idx, src_idx

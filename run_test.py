@@ -7,7 +7,7 @@ from dataset import CrowdDataset, collate_fn
 from p2pnet import P2PNet
 
 # --- Config ---
-DATA_ROOT = "/run/media/Shutong/Data/Study/deep learning/project/Dataset/part_A_final/test_data/images/IMG_1.jpg"
+DATA_ROOT = "Dataset/ShanghaiTech"
 WEIGHT_PATH = "weights/latest.pth"
 OUTPUT_DIR = "vis_results"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
