@@ -158,10 +158,13 @@ class HungarianMatcher(nn.Module):
         return indices
 
 class P2PNetLoss(nn.Module):
-    def __init__(self, matcher, lambda_neg=0.5):
+    def __init__(self, matcher, lambda_neg=0.5, use_focal=False, focal_alpha=0.25, focal_gamma=2.0):
         super().__init__()
         self.matcher = matcher
         self.lambda_neg = lambda_neg # 教程中的 lambda_neg
+        self.use_focal = use_focal
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
         # These weights mirror DETR-style balancing between classification and point losses
         self.weight_dict = {
             'loss_ce': 1.0,
@@ -182,19 +185,29 @@ class P2PNetLoss(nn.Module):
         else:
             target_points = torch.zeros((0, 2), device=src_points.device, dtype=src_points.dtype)
 
-        # --- 1. Classification Loss (BCE with Weight) ---
+        # --- 1. Classification Loss (BCE or Focal) ---
         target_classes = torch.zeros_like(src_logits.squeeze(-1))
         target_classes[idx] = 1.0 # Matched = 1
-        
-        # Weights: matched=1.0, background=lambda_neg
-        weights = torch.full_like(src_logits.squeeze(-1), self.lambda_neg)
-        weights[idx] = 1.0
-        
-        loss_ce = F.binary_cross_entropy_with_logits(
-            src_logits.squeeze(-1), 
-            target_classes, 
-            weight=weights
-        )
+
+        logits = src_logits.squeeze(-1)
+        if self.use_focal:
+            probs = torch.sigmoid(logits)
+            pt = probs * target_classes + (1 - probs) * (1 - target_classes)
+            alpha_t = self.focal_alpha * target_classes + (1 - self.focal_alpha) * (1 - target_classes)
+            focal_weight = alpha_t * (1 - pt).pow(self.focal_gamma)
+            bce = F.binary_cross_entropy_with_logits(logits, target_classes, reduction='none')
+            neg_weight = torch.ones_like(target_classes)
+            neg_weight[target_classes < 0.5] = self.lambda_neg
+            loss_ce = (focal_weight * bce * neg_weight).mean()
+        else:
+            # Weights: matched=1.0, background=lambda_neg
+            weights = torch.full_like(logits, self.lambda_neg)
+            weights[idx] = 1.0
+            loss_ce = F.binary_cross_entropy_with_logits(
+                logits,
+                target_classes,
+                weight=weights
+            )
 
         # --- 2. Localization Loss (MSE on matched only) ---
         if len(target_points) == 0:

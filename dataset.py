@@ -1,12 +1,28 @@
 import torch
 import numpy as np
 import os
+import random
 from torch.utils.data import Dataset
 from PIL import Image
+from PIL import ImageEnhance, ImageFilter
 from scipy.io import loadmat
 
 class CrowdDataset(Dataset):
-    def __init__(self, root, part='part_A_final', split='train', crop_size=224, method='train'):
+    def __init__(
+        self,
+        root,
+        part='part_A_final',
+        split='train',
+        crop_size=384,
+        method='train',
+        validate_gt=True,
+        gt_check_samples=5,
+        use_augment=True,
+        hflip_prob=0.5,
+        jitter_strength=0.2,
+        blur_prob=0.3,
+        blur_radius=1.2,
+    ):
         """
         method: 'train' (随机裁剪), 'val' (原图), 'test' (原图)
         """
@@ -14,6 +30,11 @@ class CrowdDataset(Dataset):
         self.split = split
         self.method = method
         self.crop_size = crop_size
+        self.use_augment = use_augment
+        self.hflip_prob = hflip_prob
+        self.jitter_strength = jitter_strength
+        self.blur_prob = blur_prob
+        self.blur_radius = blur_radius
         
         # 1. 确定图片和GT的子文件夹
         if split == 'train':
@@ -46,6 +67,9 @@ class CrowdDataset(Dataset):
             self.gt_prefix = 'GT_'
         else:
             raise RuntimeError(f"No supported annotation files found in {path_gt}")
+
+        if has_npy and has_mat:
+            print(f"[WARN] Both .npy and .mat found in {path_gt}. Using .npy. Ensure images match the .npy pipeline.")
         
         self.img_paths = []
         self.gt_paths = []
@@ -68,6 +92,9 @@ class CrowdDataset(Dataset):
             
         print(f"[{split.upper()}] Loaded {len(self.img_paths)} images from {path_img}")
 
+        if validate_gt:
+            self._validate_gt_alignment(sample_size=gt_check_samples)
+
     def __len__(self):
         return len(self.img_paths)
 
@@ -84,10 +111,11 @@ class CrowdDataset(Dataset):
 
         # 2. 预处理 (Train vs Test)
         if self.method == 'train':
-            img, points = self._ensure_min_size(img, points)
+            # 保持长宽比：短边缩放到 crop_size
+            img, points = self._resize_keep_aspect(img, points, self.crop_size)
             w, h = img.size
 
-            # --- 训练：随机裁剪固定大小 (224x224) ---
+            # --- 训练：随机裁剪固定大小 (384x384) ---
             i, j, th, tw = self._random_crop_params(h, w, self.crop_size, self.crop_size)
 
             img = img.crop((j, i, j + tw, i + th))
@@ -98,10 +126,16 @@ class CrowdDataset(Dataset):
                 mask = (points[:, 0] >= 0) & (points[:, 0] < tw) & \
                        (points[:, 1] >= 0) & (points[:, 1] < th)
                 points = points[mask]
+
+            # --- Data Augmentations ---
+            if self.use_augment:
+                img, points = self._random_hflip(img, points)
+                img = self._color_jitter(img)
         
         else:
-            # --- 测试/验证：调整为 128 倍数 (Lanczos Resizing) ---
-            img, points = self._resize_for_eval(img, points)
+            # --- 测试/验证：保持长宽比，仅缩放短边到 crop_size（不裁剪） ---
+            img, points = self._resize_keep_aspect(img, points, self.crop_size)
+            w, h = img.size
 
         # 3. 归一化 (Standard ImageNet mean/std)
         img_tensor = torch.tensor(np.array(img)).permute(2, 0, 1).float() / 255.0
@@ -140,17 +174,54 @@ class CrowdDataset(Dataset):
 
         return points.reshape(-1, 2)
 
-    def _ensure_min_size(self, img, points):
+    def _validate_gt_alignment(self, sample_size=5, tol=1.0):
+        if len(self.img_paths) == 0:
+            return
+
+        sample_size = min(sample_size, len(self.img_paths))
+        bad = 0
+
+        for idx in range(sample_size):
+            img_path = self.img_paths[idx]
+            gt_path = self.gt_paths[idx]
+
+            try:
+                img = Image.open(img_path).convert('RGB')
+                w, h = img.size
+                points = self._load_points(gt_path)
+            except Exception as e:
+                print(f"[WARN] GT alignment check failed for {img_path}: {e}")
+                bad += 1
+                continue
+
+            if len(points) == 0:
+                continue
+
+            out_x = (points[:, 0] < -tol) | (points[:, 0] > (w - 1 + tol))
+            out_y = (points[:, 1] < -tol) | (points[:, 1] > (h - 1 + tol))
+            if (out_x | out_y).any():
+                bad += 1
+
+        if bad > 0:
+            print(
+                "[WARN] GT points appear out of image bounds for some samples. "
+                "Check that images and annotations come from the same pipeline (original .mat with original images, "
+                "or preprocessed .npy with preprocessed images)."
+            )
+
+    def _resize_keep_aspect(self, img, points, target):
         w, h = img.size
-        min_side = min(w, h)
-        if min_side >= self.crop_size:
+        if w == 0 or h == 0:
             return img, points
 
-        scale = self.crop_size / max(min_side, 1)
+        scale = target / min(w, h)
         new_w = int(round(w * scale))
         new_h = int(round(h * scale))
-        img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
 
+        if new_w == w and new_h == h:
+            return img, points
+
+        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         if len(points) > 0:
             points = points.copy()
             points[:, 0] *= new_w / w
@@ -158,24 +229,53 @@ class CrowdDataset(Dataset):
 
         return img, points
 
-    def _resize_for_eval(self, img, points):
-        w, h = img.size
-        new_w = max(128, (w // 128) * 128)
-        new_h = max(128, (h // 128) * 128)
-
-        if new_w == 0 or new_h == 0:
-            return img, points
-
-        if new_w != w or new_h != h:
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    def _random_hflip(self, img, points):
+        if random.random() < self.hflip_prob:
+            img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             if len(points) > 0:
+                w = img.size[0]
                 points = points.copy()
-                points[:, 0] *= new_w / w
-                points[:, 1] *= new_h / h
-
+                points[:, 0] = (w - 1) - points[:, 0]
         return img, points
 
+    def _color_jitter(self, img):
+        if self.jitter_strength <= 0:
+            return img
+
+        # Brightness
+        if random.random() < 0.8:
+            factor = 1.0 + random.uniform(-self.jitter_strength, self.jitter_strength)
+            img = ImageEnhance.Brightness(img).enhance(factor)
+
+        # Contrast
+        if random.random() < 0.8:
+            factor = 1.0 + random.uniform(-self.jitter_strength, self.jitter_strength)
+            img = ImageEnhance.Contrast(img).enhance(factor)
+
+        # Saturation
+        if random.random() < 0.8:
+            factor = 1.0 + random.uniform(-self.jitter_strength, self.jitter_strength)
+            img = ImageEnhance.Color(img).enhance(factor)
+
+        # Background blur
+        if self.blur_prob > 0 and random.random() < self.blur_prob:
+            img = img.filter(ImageFilter.GaussianBlur(radius=self.blur_radius))
+
+        return img
+
+
 def collate_fn(batch):
-    images = torch.stack([b[0] for b in batch], dim=0)
+    images = [b[0] for b in batch]
     targets = [b[1] for b in batch]
-    return images, targets
+
+    # Pad to max size in batch
+    max_h = max(img.shape[1] for img in images)
+    max_w = max(img.shape[2] for img in images)
+    batch_size = len(images)
+
+    padded = images[0].new_zeros((batch_size, 3, max_h, max_w))
+    for i, img in enumerate(images):
+        c, h, w = img.shape
+        padded[i, :, :h, :w] = img
+
+    return padded, targets

@@ -223,6 +223,7 @@ checkpoints/
 vis_results/
 outputs/
 results/
+results_train/
 
 # 忽略 Tensorboard 日志 (如果有用到)
 runs/
