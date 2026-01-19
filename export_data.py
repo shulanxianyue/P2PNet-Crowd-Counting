@@ -2,10 +2,7 @@ import os
 import cv2
 import numpy as np
 import scipy.io as io
-import math
 import glob
-import random
-from PIL import Image, ImageEnhance, ImageFilter
 
 # Use tqdm if installed, otherwise pass through
 try:
@@ -14,15 +11,8 @@ except ImportError:
     tqdm = lambda x: x
 
 # Paths
-INPUT_ROOT = "Dataset/ShanghaiTech"
+INPUT_ROOT = ".data/ShanghaiTech"
 OUTPUT_ROOT = "expd/ShanghaiTech"
-TARGET_SIZE = 384
-
-# Augmentations (applied only to train_data when ENABLE_AUGMENT=True)
-ENABLE_AUGMENT = True
-JITTER_STRENGTH = 0.2
-BLUR_PROB = 0.3
-BLUR_RADIUS = 1.2
 
 PARTS = ["part_A_final", "part_B_final"]
 SPLITS = ["train_data", "test_data"]
@@ -42,13 +32,15 @@ def preprocess_dataset():
             os.makedirs(out_gts_dir, exist_ok=True)
 
             img_paths = glob.glob(os.path.join(in_imgs_dir, "*.jpg"))
-            print(f"[{part}/{split}] Found {len(img_paths)} images. Starting preprocessing...")
+            print(f"[{part}/{split}] Found {len(img_paths)} images. Starting export...")
 
             for img_path in tqdm(img_paths):
                 # Read image
                 img = cv2.imread(img_path)
                 if img is None:
                     continue
+
+                h, w = img.shape[:2]
 
                 # Load corresponding mat file
                 fname = os.path.basename(img_path)
@@ -65,38 +57,12 @@ def preprocess_dataset():
                         pass
 
                 points = np.array(points, dtype=np.float32).reshape(-1, 2)
+                if points.size > 0:
+                    mask = (points[:, 0] >= 0) & (points[:, 0] < w) & \
+                           (points[:, 1] >= 0) & (points[:, 1] < h)
+                    points = points[mask]
 
-                # 1. Resize keep-aspect (short side to TARGET_SIZE)
-                h, w = img.shape[:2]
-                scale = TARGET_SIZE / min(h, w)
-                new_h = int(round(h * scale))
-                new_w = int(round(w * scale))
-                if new_h <= 0 or new_w <= 0:
-                    continue
-
-                img = cv2.resize(img, (new_w, new_h))
-                points *= scale
-
-                # 2. Augmentations (train split only)
-                if ENABLE_AUGMENT and split == "train_data":
-                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(img_rgb)
-
-                    if random.random() < 0.8:
-                        factor = 1.0 + random.uniform(-JITTER_STRENGTH, JITTER_STRENGTH)
-                        pil_img = ImageEnhance.Brightness(pil_img).enhance(factor)
-                    if random.random() < 0.8:
-                        factor = 1.0 + random.uniform(-JITTER_STRENGTH, JITTER_STRENGTH)
-                        pil_img = ImageEnhance.Contrast(pil_img).enhance(factor)
-                    if random.random() < 0.8:
-                        factor = 1.0 + random.uniform(-JITTER_STRENGTH, JITTER_STRENGTH)
-                        pil_img = ImageEnhance.Color(pil_img).enhance(factor)
-                    if BLUR_PROB > 0 and random.random() < BLUR_PROB:
-                        pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=BLUR_RADIUS))
-
-                    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-                # Save processed data
+                # Save original image and exported GT points (.npy)
                 cv2.imwrite(os.path.join(out_imgs_dir, fname), img)
                 np.save(os.path.join(out_gts_dir, fname.replace('.jpg', '.npy')), points)
 

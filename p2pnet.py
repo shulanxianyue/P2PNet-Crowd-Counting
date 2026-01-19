@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import vgg16
 from scipy.optimize import linear_sum_assignment
+from backbone import Backbone
 
 # ===========================
 # 1. Anchor Generator (教程版)
@@ -31,29 +31,7 @@ def make_anchors(height, width, stride=8, device="cpu"):
     return anchors
 
 # ===========================
-# 2. Backbone (Truncated VGG16)
-# ===========================
-class Backbone(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # 加载预训练权重 (兼容旧版 torchvision)
-        vgg = vgg16(pretrained=True)
-        features = list(vgg.features.children())
-        
-        # Block 4 Output: index 0 to 22 (ReLU after Conv4_3)
-        self.block4 = nn.Sequential(*features[:23])
-        # Block 5 Output: index 23 to 29 (ReLU after Conv5_3)
-        self.block5 = nn.Sequential(*features[23:30])
-        
-        # 冻结参数逻辑会在 train.py 中控制，这里默认 requires_grad=True
-
-    def forward(self, x):
-        c4 = self.block4(x) # H/8
-        c5 = self.block5(c4) # H/16
-        return c4, c5
-
-# ===========================
-# 3. P2PNet Complete Model
+# 2. P2PNet Complete Model
 # ===========================
 class P2PNet(nn.Module):
     def __init__(self):
@@ -61,7 +39,8 @@ class P2PNet(nn.Module):
         self.backbone = Backbone()
         
         # Neck
-        self.neck_c4 = nn.Conv2d(512, 256, 1)
+        # backbone body1 (stride 8) -> 256 channels, body2 (stride 16) -> 512 channels
+        self.neck_c4 = nn.Conv2d(256, 256, 1)
         self.neck_c5 = nn.Conv2d(512, 256, 1)
         self.neck_refine = nn.Conv2d(256, 256, 3, padding=1)
 
@@ -78,7 +57,8 @@ class P2PNet(nn.Module):
         )
 
     def forward(self, x):
-        c4, c5 = self.backbone(x)
+        feats = self.backbone(x)
+        c4, c5 = feats[0], feats[1]
         
         # Neck FPN
         c5_reduced = self.neck_c5(c5)
@@ -112,9 +92,10 @@ class P2PNet(nn.Module):
 # 4. Matcher & Loss (严格按照教程)
 # ===========================
 class HungarianMatcher(nn.Module):
-    def __init__(self, tau=0.5):
+    def __init__(self, cost_class=1.0, cost_point=1.0):
         super().__init__()
-        self.tau = tau
+        self.cost_class = cost_class
+        self.cost_point = cost_point
 
     @torch.no_grad()
     def forward(self, outputs, targets):
@@ -122,14 +103,14 @@ class HungarianMatcher(nn.Module):
         
         # Flatten predictions
         out_prob = outputs['pred_logits'].sigmoid().flatten(0, 1).squeeze(-1) # [batch*queries]
-        out_bbox = outputs['pred_points'].flatten(0, 1) # [batch*queries, 2]
+        out_points = outputs['pred_points'].flatten(0, 1) # [batch*queries, 2]
         
         indices = []
         for i in range(bs):
             # 拿到第 i 张图的预测和 GT
             p_prob = out_prob[i*num_queries : (i+1)*num_queries]
-            p_bbox = out_bbox[i*num_queries : (i+1)*num_queries]
-            tgt_bbox = targets[i]['point'].to(p_bbox.device)
+            p_points = out_points[i*num_queries : (i+1)*num_queries]
+            tgt_bbox = targets[i]['point'].to(p_points.device)
             
             if len(tgt_bbox) == 0:
                 empty = torch.as_tensor([], dtype=torch.int64)
@@ -139,14 +120,14 @@ class HungarianMatcher(nn.Module):
             # Compute Cost Matrix
             # Cost = tau * Dist + (1 - Score)
             # Distance (L2)
-            dists = torch.cdist(p_bbox, tgt_bbox, p=2) # [num_queries, num_gt]
+            dists = torch.cdist(p_points, tgt_bbox, p=2) # [num_queries, num_gt]
             
             # Score Cost
             # shape matching: p_prob [Q], tgt [G] -> need [Q, G]
             # p_prob.unsqueeze(-1) gives [Q, 1]
             cost_class = 1 - p_prob.unsqueeze(-1)
             
-            C = self.tau * dists + cost_class
+            C = (self.cost_point * dists) + (self.cost_class * cost_class)
             
             # Hungarian Algorithm
             C_cpu = C.cpu().numpy()

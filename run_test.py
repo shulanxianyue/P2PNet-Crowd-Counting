@@ -2,21 +2,22 @@ import torch
 import os
 import cv2
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from dataset import CrowdDataset, collate_fn
-from p2pnet import P2PNet
+from p2pnet import P2PNet, HungarianMatcher
 import csv
 import re
 from pathlib import Path
 import matplotlib.pyplot as plt
 
 # --- Config ---
-DATA_ROOT = "Dataset/ShanghaiTech"
-WEIGHT_PATH = "weights/epoch_40.pth"
+DATA_ROOT = "expd/ShanghaiTech"
+WEIGHT_PATH = "weights/epoch_30.pth"
 OUTPUT_DIR = "vis_results"
 RESULTS_DIR = "results"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SAVE_VIS_COUNT = 3
+MATCH_DIST_THRESH = 8.0
 
 def _list_weight_paths(weights_dir: str) -> list[str]:
     paths = []
@@ -46,7 +47,10 @@ def evaluate_and_visualize(weight_path: str):
     
     # 1. Dataset (Method='test' 保持原图)
     # Batch Size 必须为 1，因为每张原图大小不一样
-    test_set = CrowdDataset(DATA_ROOT, split='test', method='test')
+    test_set = ConcatDataset([
+        CrowdDataset(DATA_ROOT, part='part_A_final', split='test', method='test'),
+        CrowdDataset(DATA_ROOT, part='part_B_final', split='test', method='test'),
+    ])
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False, collate_fn=collate_fn)
     
     # 2. Model
@@ -64,6 +68,10 @@ def evaluate_and_visualize(weight_path: str):
     mae = 0
     mse = 0
     total_imgs = len(test_loader)
+    matcher = HungarianMatcher(cost_class=1.0, cost_point=1.0)
+    matched_dists = []
+    matched_within = 0
+    matched_total = 0
     
     print(f"Starting evaluation on {total_imgs} images...")
     
@@ -75,6 +83,16 @@ def evaluate_and_visualize(weight_path: str):
             gt_count = len(targets[0]['point'])
             
             outputs = model(imgs)
+            indices = matcher(outputs, targets)
+            for b, (src_idx, tgt_idx) in enumerate(indices):
+                if src_idx.numel() == 0:
+                    continue
+                pred_pts = outputs['pred_points'][b, src_idx]
+                tgt_pts = targets[b]['point'][tgt_idx].to(pred_pts.device)
+                dists = torch.norm(pred_pts - tgt_pts, dim=1)
+                matched_dists.append(dists.detach().cpu())
+                matched_within += int((dists <= MATCH_DIST_THRESH).sum().item())
+                matched_total += int(dists.numel())
             
             # --- Counting Metrics (Tutorial Section) ---
             logits = outputs['pred_logits'].view(-1)
@@ -118,6 +136,13 @@ def evaluate_and_visualize(weight_path: str):
 
     mae = mae / total_imgs
     mse = (mse / total_imgs) ** 0.5 # RMSE
+
+    if matched_dists:
+        all_dists = torch.cat(matched_dists, dim=0)
+        mean_dist = all_dists.mean().item()
+        median_dist = all_dists.median().item()
+        acc_dist = matched_within / max(1, matched_total)
+        print(f"MatchDist mean/median: {mean_dist:.2f}/{median_dist:.2f} px | Acc@{MATCH_DIST_THRESH:.0f}px={acc_dist:.3f}")
     
     print("=========================================")
     print(f"Final Results:")
@@ -133,7 +158,10 @@ def evaluate_all_checkpoints():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Dataset (Method='test' 保持原图)
-    test_set = CrowdDataset(DATA_ROOT, split='test', method='test')
+    test_set = ConcatDataset([
+        CrowdDataset(DATA_ROOT, part='part_A_final', split='test', method='test'),
+        CrowdDataset(DATA_ROOT, part='part_B_final', split='test', method='test'),
+    ])
     test_loader = DataLoader(test_set, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     weights_dir = os.path.dirname(WEIGHT_PATH) or "weights"
@@ -146,6 +174,7 @@ def evaluate_all_checkpoints():
         return
 
     metrics = []
+    matcher = HungarianMatcher(cost_class=1.0, cost_point=1.0)
 
     for weight_path in all_paths:
         model = P2PNet().to(DEVICE)
@@ -156,6 +185,9 @@ def evaluate_all_checkpoints():
         mae = 0
         mse = 0
         total_imgs = len(test_loader)
+        matched_dists = []
+        matched_within = 0
+        matched_total = 0
         saved_vis = 0
 
         with torch.no_grad():
@@ -164,6 +196,16 @@ def evaluate_all_checkpoints():
                 gt_count = len(targets[0]['point'])
 
                 outputs = model(imgs)
+                indices = matcher(outputs, targets)
+                for b, (src_idx, tgt_idx) in enumerate(indices):
+                    if src_idx.numel() == 0:
+                        continue
+                    pred_pts = outputs['pred_points'][b, src_idx]
+                    tgt_pts = targets[b]['point'][tgt_idx].to(pred_pts.device)
+                    dists = torch.norm(pred_pts - tgt_pts, dim=1)
+                    matched_dists.append(dists.detach().cpu())
+                    matched_within += int((dists <= MATCH_DIST_THRESH).sum().item())
+                    matched_total += int(dists.numel())
                 logits = outputs['pred_logits'].view(-1)
                 points = outputs['pred_points'].view(-1, 2)
                 scores = torch.sigmoid(logits)
@@ -177,7 +219,7 @@ def evaluate_all_checkpoints():
                 # Visualization: Save 2 images per epoch
                 if saved_vis < 2:
                     mask = scores > 0.45
-                    
+
                     img_np = imgs[0].cpu().permute(1, 2, 0).numpy()
                     img_np = (img_np * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])
                     img_np = (img_np * 255).astype(np.uint8)
@@ -201,6 +243,13 @@ def evaluate_all_checkpoints():
         mse = (mse / total_imgs) ** 0.5
 
         epoch_match = re.search(r"epoch_(\d+)", weight_path)
+        if matched_dists:
+            all_dists = torch.cat(matched_dists, dim=0)
+            mean_dist = all_dists.mean().item()
+            median_dist = all_dists.median().item()
+            acc_dist = matched_within / max(1, matched_total)
+            print(f"MatchDist mean/median: {mean_dist:.2f}/{median_dist:.2f} px | Acc@{MATCH_DIST_THRESH:.0f}px={acc_dist:.3f}")
+
         if epoch_match:
             label = f"epoch_{int(epoch_match.group(1))}"
             print(f"Epoch {int(epoch_match.group(1))}: MAE={mae:.4f}, MSE={mse:.4f}")

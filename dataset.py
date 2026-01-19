@@ -13,15 +13,15 @@ class CrowdDataset(Dataset):
         root,
         part='part_A_final',
         split='train',
-        crop_size=384,
+        crop_size=224,
         method='train',
         validate_gt=True,
         gt_check_samples=5,
         use_augment=True,
         hflip_prob=0.5,
         jitter_strength=0.2,
-        blur_prob=0.3,
-        blur_radius=1.2,
+        blur_prob=0.1,
+        blur_radius=1.0,
     ):
         """
         method: 'train' (随机裁剪), 'val' (原图), 'test' (原图)
@@ -108,6 +108,7 @@ class CrowdDataset(Dataset):
         w, h = img.size
         
         points = self._load_points(gt_path)
+        points = self._filter_points_to_image(points, w, h)
 
         # 2. 预处理 (Train vs Test)
         if self.method == 'train':
@@ -173,6 +174,14 @@ class CrowdDataset(Dataset):
             points = np.zeros((0, 2), dtype=np.float32)
 
         return points.reshape(-1, 2)
+
+    def _filter_points_to_image(self, points, w, h):
+        if points is None or len(points) == 0:
+            return points
+        points = points.reshape(-1, 2)
+        mask = (points[:, 0] >= 0) & (points[:, 0] < w) & \
+               (points[:, 1] >= 0) & (points[:, 1] < h)
+        return points[mask]
 
     def _validate_gt_alignment(self, sample_size=5, tol=1.0):
         if len(self.img_paths) == 0:
@@ -268,14 +277,9 @@ def collate_fn(batch):
     images = [b[0] for b in batch]
     targets = [b[1] for b in batch]
 
-    # Pad to max size in batch
-    max_h = max(img.shape[1] for img in images)
-    max_w = max(img.shape[2] for img in images)
-    batch_size = len(images)
-
-    padded = images[0].new_zeros((batch_size, 3, max_h, max_w))
-    for i, img in enumerate(images):
-        c, h, w = img.shape
-        padded[i, :, :h, :w] = img
-
-    return padded, targets
+    # Stack images (expects same H/W)
+    sizes = {(img.shape[1], img.shape[2]) for img in images}
+    if len(sizes) != 1:
+        raise ValueError(f"Inconsistent image sizes in batch: {sorted(sizes)}")
+    images = torch.stack(images, dim=0)
+    return images, list(targets)

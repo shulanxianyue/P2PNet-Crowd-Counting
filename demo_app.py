@@ -10,7 +10,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEIGHT_PATH = os.path.join(BASE_DIR, "weights", "best.pth")  # <- set your weight here
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 THRESHOLD = 0.5   # hard count threshold
-CROP_SIZE = 384   # short side size, consistent with training/test
+CROP_SIZE = 224   # short side size, consistent with training/test
 
 def _resize_short_side(img: Image.Image, target: int):
     w, h = img.size
@@ -52,6 +52,15 @@ def _draw_points(img: Image.Image, points: np.ndarray, color=(255, 0, 0), radius
         draw.ellipse([left_up, right_down], outline=color, fill=color)
     return img
 
+def _filter_points_in_bounds(points: np.ndarray, width: int, height: int) -> np.ndarray:
+    if points.size == 0:
+        return points
+    mask = (
+        (points[:, 0] >= 0) & (points[:, 0] < width) &
+        (points[:, 1] >= 0) & (points[:, 1] < height)
+    )
+    return points[mask]
+
 
 st.set_page_config(page_title="P2PNet Demo", layout="centered")
 st.title("P2PNet Crowd Counting Demo")
@@ -82,5 +91,11 @@ if uploaded is not None:
                 st.success(f"Count: {pred_count}")
 
                 vis = resized_img.copy()
-                vis = _draw_points(vis, points[mask], color=(255, 0, 0), radius=4)
+                w, h = vis.size
+                pred_points = points[mask]
+                in_bounds = _filter_points_in_bounds(pred_points, w, h)
+                oob = len(pred_points) - len(in_bounds)
+                if oob > 0:
+                    st.warning(f"{oob} predicted points are خارج bounds and were hidden.")
+                vis = _draw_points(vis, in_bounds, color=(255, 0, 0), radius=4)
                 st.image(vis, caption="Predicted Points", width="stretch")
